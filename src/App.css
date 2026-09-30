@@ -4893,6 +4893,68 @@ body.dragging-files * {
   font-size: 48px;
 }
 
+/* Group site cards by their actual Nginx configuration file. */
+.site-config-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.site-config-group {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.site-config-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 0;
+  background: var(--bg-panel);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.site-config-header:hover,
+.site-config-header:focus-visible {
+  background: var(--bg-subtle);
+}
+
+.site-config-path {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: monospace;
+  font-size: 13px;
+}
+
+.site-config-count {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.site-config-arrow {
+  flex: none;
+  font-size: 23px;
+  line-height: 1;
+  transition: transform 0.15s ease;
+}
+
+.site-config-arrow.expanded {
+  transform: rotate(90deg);
+}
+
+.site-config-group > .sites-grid {
+  padding: 12px;
+  border-top: 1px solid var(--border);
+}
+
 .sites-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));

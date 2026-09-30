@@ -48,6 +48,32 @@ export default function SitesPanel({ sessionId, onOpenFolder, visible, onNavigat
 
   // Search
   const [searchQuery, setSearchQuery] = useState('')
+  const [expandedConfigs, setExpandedConfigs] = useState<Set<string>>(() => new Set())
+
+  const query = searchQuery.trim().toLowerCase()
+  const siteGroups = Array.from(
+    sites.reduce((groups, site) => {
+      const entries = groups.get(site.config_path) ?? []
+      entries.push(site)
+      groups.set(site.config_path, entries)
+      return groups
+    }, new Map<string, SiteInfo[]>())
+  ).map(([path, entries]) => ({
+    path,
+    entries: query && !path.toLowerCase().includes(query)
+      ? entries.filter(site => site.domain.toLowerCase().includes(query))
+      : entries,
+  })).filter(group => group.entries.length > 0)
+
+  const toggleConfig = (path: string) => {
+    if (query) return
+    setExpandedConfigs(previous => {
+      const next = new Set(previous)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }
 
   // Delete dialog
   const [deleteTarget, setDeleteTarget] = useState<SiteInfo | null>(null)
@@ -277,10 +303,23 @@ export default function SitesPanel({ sessionId, onOpenFolder, visible, onNavigat
                   {t('sites.searchResultsHint')}
                 </div>
               )}
-              <div className="sites-grid">
-              {sites
-                .filter(s => !searchQuery || s.domain.toLowerCase().includes(searchQuery.toLowerCase()))
-                .map((site) => (
+              <div className="site-config-list">
+              {siteGroups.map(({ path, entries }) => (
+                <section className="site-config-group" key={path}>
+                  <button
+                    type="button"
+                    className="site-config-header"
+                    onClick={() => toggleConfig(path)}
+                    aria-expanded={query ? true : expandedConfigs.has(path)}
+                    aria-label={`${path} (${entries.length})`}
+                  >
+                    <span className="site-config-path" title={path}>{path}</span>
+                    <span className="site-config-count">{entries.length}</span>
+                    <span className={`site-config-arrow ${query || expandedConfigs.has(path) ? 'expanded' : ''}`} aria-hidden="true">›</span>
+                  </button>
+                  {(query || expandedConfigs.has(path)) && (
+                    <div className="sites-grid">
+                      {entries.map((site) => (
                 <div className={`site-card ${site.enabled ? 'running' : 'stopped'}`} key={`${site.config_path}:${site.domain}`}>
                   <div className="site-card-header">
                     <div className="site-domain">
@@ -334,6 +373,10 @@ export default function SitesPanel({ sessionId, onOpenFolder, visible, onNavigat
                     🗑️
                   </button>
                 </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
               ))}
             </div>
             </>
