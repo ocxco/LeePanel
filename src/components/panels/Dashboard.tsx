@@ -65,6 +65,7 @@ function percentBar(used: number, total: number): { percent: number; color: stri
 export default function Dashboard({ sessionId, onNavigate }: DashboardProps) {
   const { t } = useTranslation()
   const [sysInfo, setSysInfo] = useState<SystemInfo | null>(null)
+  const [liveCpu, setLiveCpu] = useState<number | null>(null)
   const [services, setServices] = useState<ServiceStatus[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -117,6 +118,29 @@ export default function Dashboard({ sessionId, onNavigate }: DashboardProps) {
     }
   }, [sessionId])
 
+  // Use the same CPU reading as Monitor, independently of the cached system info.
+  useEffect(() => {
+    setLiveCpu(null)
+    if (!sessionId) return
+    let active = true
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const refreshCpu = async () => {
+      try {
+        const result = await invoke<{ cpu_percent: number }>('server_get_monitor_data', { sessionId })
+        if (active) setLiveCpu(result.cpu_percent)
+      } catch {
+        // Keep the last successful reading while a refresh fails.
+      } finally {
+        if (active) timer = setTimeout(refreshCpu, 5000)
+      }
+    }
+    refreshCpu()
+    return () => {
+      active = false
+      if (timer) clearTimeout(timer)
+    }
+  }, [sessionId])
+
   if (!sessionId) {
     return (
       <div className="sp-empty">
@@ -144,7 +168,8 @@ export default function Dashboard({ sessionId, onNavigate }: DashboardProps) {
 
   const mem = sysInfo ? percentBar(sysInfo.mem_used_mb, sysInfo.mem_total_mb) : null
   const swap = sysInfo ? percentBar(sysInfo.swap_used_mb, sysInfo.swap_total_mb) : null
-  const cpu = sysInfo && sysInfo.cpu_percent !== undefined ? percentBar(sysInfo.cpu_percent, 100) : null
+  const cpuPercent = liveCpu ?? sysInfo?.cpu_percent
+  const cpu = cpuPercent !== undefined ? percentBar(cpuPercent, 100) : null
 
   // Deduplicate MySQL/MariaDB services
   const displayServices = services.filter(s => {
@@ -239,7 +264,7 @@ export default function Dashboard({ sessionId, onNavigate }: DashboardProps) {
               <div className="sp-resource-item">
                 <div className="sp-resource-header">
                   <span>{t('dashboard.cpu')}</span>
-                  <span>{sysInfo.cpu_percent}% - {sysInfo.cpu_model} ({sysInfo.cpu_cores} {t('dashboard.cores')})</span>
+                  <span>{cpuPercent}% - {sysInfo.cpu_model} ({sysInfo.cpu_cores} {t('dashboard.cores')})</span>
                 </div>
                 <div className="sp-progress-track">
                   <div className="sp-progress-fill" style={{ width: `${cpu.percent}%`, background: cpu.color }} />

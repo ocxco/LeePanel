@@ -727,7 +727,10 @@ export default function SoftwareRepo({ sessionId }: SoftwareRepoProps) {
           {categories.map(cat => {
             const items = cat.key === 'custom'
               ? customSoftware
-              : software.filter(s => s.category === cat.key)
+              : software.filter(s => s.category === cat.key && !(
+                  cat.key === 'web' && s.name === 'php' &&
+                  software.some(other => other.category === 'web' && other.name.startsWith('php') && other.name !== 'php' && other.installed)
+                ))
             if (items.length === 0 && cat.key !== 'web' && cat.key !== 'custom') return null
             if (cat.key === 'custom' && items.length === 0) return null
             return (

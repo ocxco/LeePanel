@@ -147,7 +147,7 @@ pub async fn get_system_info(
     cache: &SshCache,
     session_id: &str,
 ) -> Result<SystemInfo, String> {
-    // ponytail: cache system info for 15s (memory/uptime/load change, but panel switches are fast)
+    // Cache system info for 15s; dashboard refreshes it every 30s.
     if let Some(cached) = cache.get(session_id, "system_info", 15) {
         if let Ok(info) = serde_json::from_str::<SystemInfo>(&cached) {
             return Ok(info);
@@ -177,14 +177,17 @@ echo "UPTIME=$(uptime -p 2>/dev/null || uptime)"
 echo "LOAD=$(cat /proc/loadavg | awk '{print $1, $2, $3}')"
 echo "CPU_MODEL=$(grep 'model name' /proc/cpuinfo | head -1 | cut -d: -f2 | xargs)"
 echo "CPU_CORES=$(nproc)"
-# CPU usage (quick snapshot from /proc/stat)
-CPU_IDLE=$(awk '/^cpu / {print $5}' /proc/stat)
-CPU_TOTAL=$(awk '/^cpu / {sum=$2+$3+$4+$5+$6+$7+$8; print sum}' /proc/stat)
-if [ "$CPU_TOTAL" -gt 0 ]; then
-  CPU_USED=$((100 - ($CPU_IDLE * 100 / $CPU_TOTAL)))
-else
-  CPU_USED=0
-fi
+# CPU usage over a short interval (not the lifetime average since boot).
+# Read both counters in one awk invocation to keep the samples consistent.
+CPU_SAMPLE=$(awk '/^cpu / {idle=$5+$6; total=0; for (i=2; i<=NF; i++) total+=$i; print idle, total; exit}' /proc/stat)
+sleep 1
+CPU_SAMPLE_NEXT=$(awk '/^cpu / {idle=$5+$6; total=0; for (i=2; i<=NF; i++) total+=$i; print idle, total; exit}' /proc/stat)
+CPU_USED=$(awk -v first="$CPU_SAMPLE" -v second="$CPU_SAMPLE_NEXT" 'BEGIN {
+  split(first, a, " "); split(second, b, " ");
+  total=b[2]-a[2]; idle=b[1]-a[1];
+  if (total > 0) { used=100*(total-idle)/total; if (used < 0) used=0; if (used > 100) used=100; printf "%.0f", used }
+  else print 0
+}')
 echo "CPU_PERCENT=$CPU_USED"
 free -m | awk '/^Mem:/ {print "MEM_TOTAL=" $2; print "MEM_USED=" $3; print "MEM_FREE=" $4}'
 free -m | awk '/^Swap:/ {print "SWAP_TOTAL=" $2; print "SWAP_USED=" $3}'
@@ -321,11 +324,25 @@ pub async fn get_service_statuses(
     // ponytail: single SSH round-trip for all services (was ~10 sequential calls)
     let (stdout, _, _) = crate::ssh::session_exec_with_output(session,
             r#"
-for svc in nginx php-fpm; do
-  ACTIVE=$(systemctl is-active $svc 2>/dev/null)
-  SUBSTATE=$(systemctl show $svc --property=SubState 2>/dev/null | cut -d= -f2)
-  echo "SVC=$svc|ACTIVE=$ACTIVE|SUB=$SUBSTATE"
+ACTIVE=$(systemctl is-active nginx 2>/dev/null)
+SUBSTATE=$(systemctl show nginx --property=SubState 2>/dev/null | cut -d= -f2)
+echo "SVC=nginx|ACTIVE=$ACTIVE|SUB=$SUBSTATE"
+# Resolve PHP-FPM units dynamically, including Debian versioned and Remi SCL names.
+# Prefer a running unit if multiple PHP versions are installed.
+PHP_SVC=""
+PHP_ACTIVE=""
+for svc in php-fpm $(systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '$1 ~ /^php([0-9]+(\.[0-9]+)?-fpm|[0-9]+-php-fpm)\.service$/ {sub(/\.service$/, "", $1); print $1}'); do
+  state=$(systemctl is-active "$svc" 2>/dev/null)
+  case "$state" in
+    active) PHP_SVC="$svc"; PHP_ACTIVE="$state"; break ;;
+    inactive|failed|activating|deactivating)
+      if [ -z "$PHP_SVC" ]; then PHP_SVC="$svc"; PHP_ACTIVE="$state"; fi ;;
+  esac
 done
+if [ -n "$PHP_SVC" ]; then
+  SUBSTATE=$(systemctl show "$PHP_SVC" --property=SubState 2>/dev/null | cut -d= -f2)
+  echo "SVC=php-fpm|ACTIVE=$PHP_ACTIVE|SUB=$SUBSTATE"
+fi
 # ponytail: BT Panel installs binaries outside PATH, fallback to /www/server/ paths
 _nver=$(nginx -v 2>&1 || /www/server/nginx/sbin/nginx -v 2>&1 || echo '')
 echo "NGINX_VER=$(echo "$_nver" | grep -oP '[\d.]+' || echo '')"
@@ -3313,9 +3330,32 @@ echo "UPTIME=$(uptime -p 2>/dev/null || uptime | sed 's/.*up /up /' | sed 's/,* 
 echo "---NET---"
 cat /proc/net/dev | grep -v 'lo:' | tail -n +3 | awk '{print $1, $2, $10}'
 
-# Disk I/O (from /proc/diskstats)
+# Disk I/O rates from two /proc/diskstats samples. Column 3 is the device name;
+# skip partitions to avoid counting the same I/O twice.
+DISK_START=$(cat /proc/diskstats)
+sleep 1
 echo "---DISK---"
-cat /proc/diskstats | grep -E '^(sd[a-z]|vd[a-z]|nvme[0-9]n[0-9]) ' | head -4
+awk -v before="$DISK_START" '
+  BEGIN {
+    count=split(before, lines, "\n")
+    for (i=1; i<=count; i++) {
+      # Strip leading whitespace before splitting into diskstats columns.
+      sub(/^[[:space:]]+/, "", lines[i])
+      split(lines[i], fields, /[[:space:]]+/)
+      if (fields[3] ~ /^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+|hd[a-z]+)$/) {
+        read[fields[3]]=fields[6]; write[fields[3]]=fields[10]
+      }
+    }
+  }
+  $3 ~ /^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+|hd[a-z]+)$/ {
+    if ($3 in read) {
+      r=$6-read[$3]; w=$10-write[$3]
+      if (r>0) total_read+=r
+      if (w>0) total_write+=w
+    }
+  }
+  END { printf "DISK_READ=%.0f\nDISK_WRITE=%.0f\n", total_read*512, total_write*512 }
+' /proc/diskstats
 
 # Top processes
 echo "---PROC---"
@@ -3343,6 +3383,8 @@ ps aux --sort=-%cpu | head -11 | tail -10
     let mut section = "";
     let mut total_net_rx: u64 = 0;
     let mut total_net_tx: u64 = 0;
+    let mut disk_read_bytes: u64 = 0;
+    let mut disk_write_bytes: u64 = 0;
 
     for line in stdout.lines() {
         if line.starts_with("---NET---") {
@@ -3367,15 +3409,12 @@ ps aux --sort=-%cpu | head -11 | tail -10
                 }
             }
             "disk" => {
-                // Simplified: just sum up sectors read/written
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 10 {
-                    let r_sectors = parts[5].parse::<u64>().unwrap_or(0);
-                    let w_sectors = parts[9].parse::<u64>().unwrap_or(0);
-                    let r_mb = r_sectors * 512 / 1024 / 1024;
-                    let w_mb = w_sectors * 512 / 1024 / 1024;
-                    data.disk_read = format!("{} MB", r_mb);
-                    data.disk_write = format!("{} MB", w_mb);
+                if let Some((key, value)) = line.split_once('=') {
+                    match key.trim() {
+                        "DISK_READ" => disk_read_bytes = value.trim().parse().unwrap_or(0),
+                        "DISK_WRITE" => disk_write_bytes = value.trim().parse().unwrap_or(0),
+                        _ => {}
+                    }
                 }
             }
             "proc" => {
@@ -3411,6 +3450,8 @@ ps aux --sort=-%cpu | head -11 | tail -10
 
     data.net_rx = format_bytes(total_net_rx);
     data.net_tx = format_bytes(total_net_tx);
+    data.disk_read = format!("{}/s", format_bytes(disk_read_bytes));
+    data.disk_write = format!("{}/s", format_bytes(disk_write_bytes));
 
     Ok(data)
 }
