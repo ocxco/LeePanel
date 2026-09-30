@@ -689,6 +689,7 @@
     "zset": "ソート済みセット"
   },
   "sites": {
+    "sharedConfigWarning": "複数のサイトが同じ Nginx 設定ファイルを共有しています。下でファイル全体を編集してください。個別の起動・停止・削除はできません。",
     "title": "サイト",
     "searchDomain": "ドメインを検索...",
     "searchResultsHint": "現在の検索結果：",
@@ -970,6 +971,8 @@
     "title": "SSL 証明書",
     "noSites": "サイトが見つかりません",
     "noSsl": "SSL なし",
+    "expiresAt": "有効期限",
+    "expiryUnknown": "不明",
     "installing": "インストール中...",
     "freeInstall": "SSL を無料インストール",
     "connectToManage": "サーバーに接続して SSL 証明書を管理",

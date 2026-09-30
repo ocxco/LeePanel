@@ -94,6 +94,7 @@ pub async fn server_delete_site(
     db: tauri::State<'_, DbPool>,
     session_id: &str,
     domain: &str,
+    config_path: &str,
     remove_files: bool,
 ) -> Result<String, String> {
     // 权限模型 v8：参数白名单校验，防站点命令注入
@@ -103,7 +104,8 @@ pub async fn server_delete_site(
     let cache = mgr.cache.clone();
     let info = session.connect_info.clone();
     drop(mgr);
-    let result = server::delete_site(&session, &cache, session_id, domain, remove_files).await;
+    crate::permissions::validate_path(config_path)?;
+    let result = server::delete_site(&session, &cache, session_id, domain, config_path, remove_files).await;
     if let Ok(conn) = db.lock() {
         crate::audit::audit_log(
             &conn, &info.host, &info.username, "site_delete",

@@ -689,6 +689,7 @@
     "zset": "Sortierte Menge"
   },
   "sites": {
+    "sharedConfigWarning": "Gemeinsame Nginx-Datei: Bearbeiten Sie unten die gesamte Konfiguration. Einzelnes Starten, Stoppen und Löschen ist nicht möglich.",
     "title": "Seiten",
     "searchDomain": "Domain suchen...",
     "searchResultsHint": "Aktuelle Suchergebnisse:",
@@ -970,6 +971,8 @@
     "title": "SSL-Zertifikate",
     "noSites": "Keine Seiten gefunden",
     "noSsl": "Kein SSL",
+    "expiresAt": "Ablaufdatum",
+    "expiryUnknown": "Unbekannt",
     "installing": "Wird installiert...",
     "freeInstall": "SSL KOSTENLOS installieren",
     "connectToManage": "Mit einem Server verbinden, um SSL-Zertifikate zu verwalten",

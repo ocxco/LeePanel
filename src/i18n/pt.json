@@ -689,6 +689,7 @@
     "zset": "Conjunto ordenado"
   },
   "sites": {
+    "sharedConfigWarning": "Arquivo Nginx compartilhado: edite a configuração completa abaixo. Não é possível iniciar, parar ou excluir sites individualmente.",
     "title": "Sites",
     "searchDomain": "Pesquisar domínio...",
     "searchResultsHint": "Resultados da pesquisa atual:",
@@ -970,6 +971,8 @@
     "title": "Certificados SSL",
     "noSites": "Nenhum site encontrado",
     "noSsl": "Sem SSL",
+    "expiresAt": "Validade",
+    "expiryUnknown": "Desconhecida",
     "installing": "Instalando...",
     "freeInstall": "Instalar SSL GRÁTIS",
     "connectToManage": "Conecte-se a um servidor para gerenciar certificados SSL",

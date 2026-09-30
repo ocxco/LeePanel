@@ -7,6 +7,7 @@ interface SiteInfo {
   domains: string
   root: string
   config_path: string
+  shared_config: boolean
   ssl: boolean
   ssl_cert_path: string | null
   ssl_key_path: string | null
@@ -167,6 +168,10 @@ export default function EditSite({
   }, [sessionId, root])
 
   const handleSaveAll = async () => {
+    if (site.shared_config) {
+      onError(t('sites.sharedConfigWarning'))
+      return
+    }
     if (!domains.trim()) {
       onError('Domain name cannot be empty')
       return
@@ -215,6 +220,7 @@ export default function EditSite({
       <div className="edit-site-header">
         <button className="back-btn" onClick={onBack}>← {t('common.back')}</button>
         <h2>{t('sites.editSite', { domain: site.domain })}</h2>
+        {site.shared_config && <div className="sp-empty">{t('sites.sharedConfigWarning')}</div>}
         <div className="edit-header-actions">
           <button className="fb-dialog-btn" onClick={onBack} disabled={saving}>
             {t('common.cancel')}

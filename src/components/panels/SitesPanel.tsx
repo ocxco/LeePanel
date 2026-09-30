@@ -11,6 +11,7 @@ interface SiteInfo {
   domains: string
   root: string
   config_path: string
+  shared_config: boolean
   ssl: boolean
   ssl_cert_path: string | null
   ssl_key_path: string | null
@@ -50,7 +51,6 @@ export default function SitesPanel({ sessionId, onOpenFolder, visible, onNavigat
 
   // Delete dialog
   const [deleteTarget, setDeleteTarget] = useState<SiteInfo | null>(null)
-  const [removeFiles, setRemoveFiles] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [confirmDomain, setConfirmDomain] = useState('')
 
@@ -141,6 +141,10 @@ export default function SitesPanel({ sessionId, onOpenFolder, visible, onNavigat
 
   const handleDelete = async () => {
     if (!deleteTarget || !sessionId) return
+    if (deleteTarget.shared_config) {
+      setError(t('sites.sharedConfigWarning'))
+      return
+    }
     
     // Validate domain input (case-insensitive)
     if (confirmDomain.trim().toLowerCase() !== deleteTarget.domain.toLowerCase()) {
@@ -154,7 +158,8 @@ export default function SitesPanel({ sessionId, onOpenFolder, visible, onNavigat
       await invokeWithSudo(() => invoke('server_delete_site', {
         sessionId,
         domain: deleteTarget.domain,
-        removeFiles,
+        configPath: deleteTarget.config_path,
+        removeFiles: false,
       }), sessionId)
       setMsg(`Site ${deleteTarget.domain} deleted`)
       setDeleteTarget(null)
@@ -169,6 +174,10 @@ export default function SitesPanel({ sessionId, onOpenFolder, visible, onNavigat
 
   const handleToggle = async (site: SiteInfo, enable: boolean) => {
     if (!sessionId) return
+    if (site.shared_config) {
+      setToast({ type: 'error', text: t('sites.sharedConfigWarning') })
+      return
+    }
     try {
       await invoke<string>('server_toggle_site', {
         sessionId,
@@ -272,7 +281,7 @@ export default function SitesPanel({ sessionId, onOpenFolder, visible, onNavigat
               {sites
                 .filter(s => !searchQuery || s.domain.toLowerCase().includes(searchQuery.toLowerCase()))
                 .map((site) => (
-                <div className={`site-card ${site.enabled ? 'running' : 'stopped'}`} key={site.config_path}>
+                <div className={`site-card ${site.enabled ? 'running' : 'stopped'}`} key={`${site.config_path}:${site.domain}`}>
                   <div className="site-card-header">
                     <div className="site-domain">
                       <span
@@ -294,6 +303,7 @@ export default function SitesPanel({ sessionId, onOpenFolder, visible, onNavigat
                         title="Open in File Browser"
                       >{site.root}</span>
                     </div>
+                    {site.shared_config && <div className="site-info-row"><span className="site-info-value">{t('sites.sharedConfigWarning')}</span></div>}
                     {site.php_version && (
                       <div className="site-info-row">
                         <span className="site-info-value">PHP {site.php_version}</span>
@@ -305,6 +315,8 @@ export default function SitesPanel({ sessionId, onOpenFolder, visible, onNavigat
                       className="svc-cfg-btn"
                       style={!site.enabled ? { background: 'var(--green-bg)', color: '#fff', border: '1px solid var(--green-strong)' } : {}}
                       onClick={() => handleToggle(site, !site.enabled)}
+                      disabled={site.shared_config}
+                      title={site.shared_config ? t('sites.sharedConfigWarning') : undefined}
                     >
                       {site.enabled ? t('common.stop') : t('common.start')}
                     </button>
@@ -315,8 +327,9 @@ export default function SitesPanel({ sessionId, onOpenFolder, visible, onNavigat
                   {/* Delete button - positioned at bottom right */}
                   <button
                     className="site-delete-btn"
-                    onClick={() => { setDeleteTarget(site); setRemoveFiles(false) }}
-                    title="Delete site"
+                    onClick={() => setDeleteTarget(site)}
+                    disabled={site.shared_config}
+                    title={site.shared_config ? t('sites.sharedConfigWarning') : 'Delete site'}
                   >
                     🗑️
                   </button>
@@ -374,19 +387,6 @@ export default function SitesPanel({ sessionId, onOpenFolder, visible, onNavigat
                 </div>
               )}
             </div>
-            
-            {/* Delete files option */}
-            <label className="site-delete-files-option enhanced">
-              <input
-                type="checkbox"
-                checked={removeFiles}
-                onChange={(e) => setRemoveFiles(e.target.checked)}
-              />
-              <div className="checkbox-content">
-                <span className="checkbox-text">{t('sites.alsoDeleteFiles')}</span>
-                <code className="path-code">{deleteTarget.root}</code>
-              </div>
-            </label>
             
             {/* Action buttons */}
             <div className="fb-dialog-actions">

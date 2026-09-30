@@ -828,6 +828,8 @@ pub struct SiteInfo {
     pub config_path: String,
     pub ssl: bool,
     pub ssl_cert_path: Option<String>,
+    pub ssl_expires_at: Option<i64>, // Unix timestamp (UTC), read from the configured certificate
+    pub shared_config: bool,         // Multiple distinct sites share this Nginx config file
     pub ssl_key_path: Option<String>,
     pub php_version: String,
     pub running_dir: String,
@@ -951,7 +953,7 @@ for dir in /etc/nginx/sites-enabled /etc/nginx/conf.d /www/server/panel/vhost/ng
       # Skip default config
       case "$(basename "$f")" in default) continue;; esac
       # Skip .disabled files in conf.d (not enabled)
-      case "$f" in *.conf.disabled) continue;; esac
+      case "$f" in *.conf.disabled|*.gmssh-disabled) continue;; esac
       echo "===TIME:$(stat -c %Y "$f" 2>/dev/null || echo 0)==="
       echo "===FILE:$f==="
       cat "$f" 2>/dev/null
@@ -1061,9 +1063,7 @@ fi
         } else if line.starts_with("===FILE:") && line.ends_with("===") {
             // Process previous file
             if !current_file.is_empty() {
-                if let Some(site) = parse_site_config(&current_file, &current_content) {
-                    sites.push(site);
-                }
+                sites.extend(parse_sites_config(&current_file, &current_content));
             }
             current_file = line
                 .trim_start_matches("===FILE:")
@@ -1077,16 +1077,164 @@ fi
     }
     // Process last file
     if !current_file.is_empty() {
-        if let Some(site) = parse_site_config(&current_file, &current_content) {
-            sites.push(site);
-        }
+        sites.extend(parse_sites_config(&current_file, &current_content));
     }
 
     // Dedup by domain (keep first occurrence = enabled)
     let mut seen_domains = std::collections::HashSet::new();
     sites.retain(|s| seen_domains.insert(s.domain.clone()));
 
+    // Query only the cert files actually referenced by site configs. Each unique file is
+    // checked once, in a single SSH round-trip. Never interpolate an untrusted path in shell.
+    let cert_paths: Vec<String> = sites.iter()
+        .filter(|site| site.ssl)
+        .filter_map(|site| site.ssl_cert_path.as_ref())
+        .filter(|path| path.starts_with('/') && !path.contains('\n') && !path.contains('\r'))
+        .cloned()
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    if !cert_paths.is_empty() {
+        let mut command = String::from("command -v openssl >/dev/null 2>&1 || exit 0\n");
+        for (index, path) in cert_paths.iter().enumerate() {
+            let quoted = format!("'{}'", path.replace('\'', "'\"'\"'"));
+            command.push_str(&format!(
+                r#"_end=$(openssl x509 -in {quoted} -noout -enddate 2>/dev/null)
+if [ -n "$_end" ]; then
+  _end=${{_end#notAfter=}}
+  _ts=$(date -u -d "$_end" +%s 2>/dev/null)
+  [ -n "$_ts" ] && printf 'CERT_EXPIRY:{index}:%s\n' "$_ts"
+fi
+"#
+            ));
+        }
+        // The SSH runner executes commands through the remote shell; sudo-wrapped sessions
+        // require one shell command rather than a bare multiline command string.
+        let command = format!("sh -c '{}'", command.replace('\'', "'\\''"));
+        if let Ok((output, _, _)) = crate::ssh::session_exec_with_output(session, &command, 15).await {
+            let mut expiries = std::collections::HashMap::new();
+            for line in output.lines() {
+                if let Some((index, timestamp)) = line.strip_prefix("CERT_EXPIRY:")
+                    .and_then(|value| value.split_once(':'))
+                {
+                    if let (Ok(index), Ok(timestamp)) = (index.parse::<usize>(), timestamp.parse::<i64>()) {
+                        if let Some(path) = cert_paths.get(index) {
+                            expiries.insert(path, timestamp);
+                        }
+                    }
+                }
+            }
+            for site in &mut sites {
+                site.ssl_expires_at = site.ssl_cert_path.as_ref()
+                    .and_then(|path| expiries.get(path).copied());
+            }
+        }
+    }
+
     Ok(sites)
+}
+
+/// Split top-level server blocks without being confused by braces inside locations,
+/// quoted regexes, or comments. Keep the raw config file path for editing.
+fn split_nginx_server_blocks(content: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut depth = 0usize;
+    let mut start = None;
+    let mut statement = String::new();
+    let mut quote = None;
+    let mut escape = false;
+    let mut comment = false;
+    for (index, ch) in content.char_indices() {
+        if comment {
+            if ch == '\n' { comment = false; }
+            continue;
+        }
+        if escape {
+            escape = false;
+            continue;
+        }
+        if ch == '\\' {
+            escape = true;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if ch == delimiter { quote = None; }
+            continue;
+        }
+        if ch == '#' {
+            // A hash in a URL/regex token (e.g. /#/c) is not a comment.
+            let previous = content[..index].chars().next_back();
+            if previous.is_none_or(|c| c.is_whitespace() || c == ';' || c == '{' || c == '}') {
+                comment = true;
+                continue;
+            }
+        }
+        if ch == '\'' || ch == '"' { quote = Some(ch); continue; }
+        match ch {
+            '{' => {
+                if depth == 0 && statement.trim() == "server" { start = Some(index + ch.len_utf8()); }
+                depth += 1;
+                statement.clear();
+            }
+            '}' => {
+                if depth > 0 {
+                    depth -= 1;
+                    if depth == 0 {
+                        if let Some(from) = start.take() { blocks.push(content[from..index].to_string()); }
+                    }
+                }
+                statement.clear();
+            }
+            ';' => statement.clear(),
+            _ if depth == 0 => {
+                if ch == '\n' { statement.clear(); } else { statement.push(ch); }
+            }
+            _ => {}
+        }
+    }
+    blocks
+}
+
+fn is_internal_nginx_config(path: &str, content: &str) -> bool {
+    path.ends_with(".gmssh-disabled")
+        || content.lines().any(|line| line.trim() == "# purpose: internal-stub-status")
+}
+
+fn parse_sites_config(path: &str, content: &str) -> Vec<SiteInfo> {
+    if is_internal_nginx_config(path, content) { return Vec::new(); }
+    let blocks = split_nginx_server_blocks(content);
+    if blocks.is_empty() {
+        // A file without a top-level server block is not a standalone site.
+        return Vec::new();
+    }
+    let mut sites: Vec<SiteInfo> = Vec::new();
+    for block in blocks {
+        if let Some(site) = parse_site_config(path, &block) {
+            if site.domain == "unknown" { continue; }
+            if let Some(existing) = sites.iter_mut().find(|existing| existing.domain == site.domain) {
+                if !existing.ssl && site.ssl { *existing = site; }
+            } else {
+                sites.push(site);
+            }
+        }
+    }
+    let distinct = sites.iter().map(|site| site.domain.as_str())
+        .collect::<std::collections::HashSet<_>>().len();
+    for site in &mut sites {
+        site.shared_config = distinct > 1;
+    }
+    sites
+}
+
+/// Nginx directives end at ';'; Certbot commonly appends a comment after it.
+/// Do not include that comment in the certificate filename.
+fn parse_nginx_cert_path(directive: &str) -> Option<String> {
+    let path = directive.split(';').next()?.trim().trim_matches('"').trim_matches('\'');
+    if path.starts_with('/') && !path.is_empty() {
+        Some(path.to_string())
+    } else {
+        None
+    }
 }
 
 /// Parse a single nginx vhost config to extract site info
@@ -1095,7 +1243,7 @@ fn parse_site_config(path: &str, content: &str) -> Option<SiteInfo> {
     use std::collections::HashSet;
     let mut domains: Vec<String> = content
         .lines()
-        .filter(|l| l.trim().starts_with("server_name"))
+        .filter(|l| l.trim().starts_with("server_name ") || l.trim().starts_with("server_name\t"))
         .flat_map(|l| {
             l.trim()
                 .strip_prefix("server_name")
@@ -1120,9 +1268,7 @@ fn parse_site_config(path: &str, content: &str) -> Option<SiteInfo> {
     let domain = domains.first().cloned().unwrap_or_else(|| "unknown".to_string());
 
     // Skip if no server_name found and filename is default-like
-    if domain == "unknown" && (path.contains("default") || path.contains("default.conf")) {
-        return None;
-    }
+    if domain == "unknown" { return None; }
 
     let root = content
         .lines()
@@ -1133,19 +1279,21 @@ fn parse_site_config(path: &str, content: &str) -> Option<SiteInfo> {
                 .map(|s| s.trim().trim_end_matches(';').trim().to_string())
         })
         .unwrap_or_else(|| format!("/var/www/{}", domain));
+    let root = root.trim_matches('"').trim_matches('\'').to_string();
 
     // ponytail: use explicit SSL marker from shell script, fall back to content scan
-    let ssl = content.lines().any(|l| l.trim() == "# __SSL:1")
-        || content.contains("ssl_certificate")
-        || content.contains("listen 443");
+    let ssl = content.lines().any(|l| l.trim_start().starts_with("ssl_certificate "))
+        || content.lines().any(|l| l.trim_start().starts_with("listen 443"));
 
     // ponytail: parse SSL cert/key paths from config
     let ssl_cert_path = content.lines()
         .find(|l| l.trim().starts_with("ssl_certificate "))
-        .and_then(|l| l.trim().strip_prefix("ssl_certificate ").map(|s| s.trim().trim_end_matches(';').trim().to_string()));
+        .and_then(|l| l.trim().strip_prefix("ssl_certificate "))
+        .and_then(parse_nginx_cert_path);
     let ssl_key_path = content.lines()
         .find(|l| l.trim().starts_with("ssl_certificate_key "))
-        .and_then(|l| l.trim().strip_prefix("ssl_certificate_key ").map(|s| s.trim().trim_end_matches(';').trim().to_string()));
+        .and_then(|l| l.trim().strip_prefix("ssl_certificate_key "))
+        .and_then(parse_nginx_cert_path);
 
     let php_version = content
         .lines()
@@ -1332,6 +1480,8 @@ fn parse_site_config(path: &str, content: &str) -> Option<SiteInfo> {
         config_path: path.to_string(),
         ssl,
         ssl_cert_path,
+        ssl_expires_at: None,
+        shared_config: false,
         ssl_key_path,
         php_version,
         running_dir,
@@ -2092,56 +2242,85 @@ pub async fn restart_site(
     Ok(format!("Restarted site {}", domain))
 }
 
-/// Delete a site
+/// Only delete a site whose actual config file matches this domain and does not
+/// contain another distinct site. Shared files must be edited as a whole.
 pub async fn delete_site(
     session: &SshSession,
     _cache: &SshCache,
     _session_id: &str,
     domain: &str,
+    config_path: &str,
     remove_files: bool,
 ) -> Result<String, String> {
-    let safe_domain = domain.replace('\'', "'\\''");
+    let allowed = [
+        "/etc/nginx/sites-enabled/", "/etc/nginx/sites-available/",
+        "/etc/nginx/conf.d/", "/www/server/panel/vhost/nginx/",
+        "/www/server/nginx/conf/vhost/",
+    ];
+    if !allowed.iter().any(|prefix| config_path.starts_with(prefix))
+        || config_path.split('/').any(|part| part == "." || part == "..")
+        || config_path.ends_with('/') || config_path.ends_with(".gmssh-disabled")
+        || !matches!(config_path.rsplit('/').next(), Some(name) if !name.starts_with('.'))
+    {
+        return Err("Invalid site configuration path".to_string());
+    }
+    let quoted = format!("'{}'", config_path.replace('\'', "'\\''"));
+    // A symlink in sites-enabled points at a second config file; removing only
+    // the link would leave the source and falsely report that the site is gone.
+    let (kind, _, kind_code) = crate::ssh::session_exec_with_output(
+        session,
+        &format!("if [ -L {quoted} ]; then echo SYMLINK; elif [ -f {quoted} ]; then echo REGULAR; fi"),
+        10,
+    ).await?;
+    if kind_code != 0 || kind.trim() != "REGULAR" {
+        return Err("Site configuration is missing or is a symlink; edit the complete file instead".to_string());
+    }
+    let (content, stderr, code) = crate::ssh::session_exec_with_output(
+        session, &format!("cat -- {quoted}"), 10,
+    ).await?;
+    if code != 0 {
+        return Err(format!("Cannot read site configuration: {}", stderr.trim()));
+    }
+    if content.is_empty() || is_internal_nginx_config(config_path, &content) {
+        return Err("Site configuration does not exist or is reserved for internal use".to_string());
+    }
+    let sites = parse_sites_config(config_path, &content);
+    if sites.len() != 1 || sites[0].domain != domain {
+        return Err("Configuration contains multiple sites or does not match the selected domain; edit the complete file instead".to_string());
+    }
 
-    // Remove symlinks and config files
-    crate::ssh::session_exec_with_output(session,
-            &format!(
-                "rm -f '/etc/nginx/sites-enabled/{}' '/etc/nginx/conf.d/{}.conf' 2>/dev/null; rm -f '/etc/nginx/sites-available/{}' 2>/dev/null",
-                safe_domain, safe_domain, safe_domain
-            ),
-            5,
-        )
-        .await?;
-
-    if remove_files {
-        // Find and remove the web root (check both common paths)
-        let (stdout, _, _) = crate::ssh::session_exec_with_output(session,
-                &format!(
-                    "for d in /www/wwwroot/{d} /var/www/{d}; do [ -d \"$d\" ] && echo \"$d\" && break; done",
-                    d = safe_domain
-                ),
-                5,
-            )
-            .await?;
-        let web_root = stdout.trim();
-        if !web_root.is_empty() {
-            crate::ssh::session_exec_with_output(session,
-                    &format!("rm -rf '{}'", web_root.replace('\'', "'\\''")),
-                    10,
-                )
-                .await?;
+    // Refuse direct files in sites-enabled if a separate sites-available copy
+    // still exists; removing just one would leave the site listed as disabled.
+    if config_path.starts_with("/etc/nginx/sites-enabled/") {
+        let counterpart = config_path.replacen("/etc/nginx/sites-enabled/", "/etc/nginx/sites-available/", 1);
+        let counterpart_quoted = format!("'{}'", counterpart.replace('\'', "'\\''"));
+        let (exists, _, exists_code) = crate::ssh::session_exec_with_output(
+            session, &format!("if [ -e {counterpart_quoted} ] || [ -L {counterpart_quoted} ]; then echo EXISTS; fi"), 10,
+        ).await?;
+        if exists_code != 0 || exists.trim() == "EXISTS" {
+            return Err("Site also has a sites-available configuration; edit both entries manually".to_string());
         }
     }
-
-    // Reload nginx
-    let (reload_stdout, reload_stderr, reload_code) = crate::ssh::session_exec_with_output(session, "nginx -t 2>&1 && systemctl reload nginx 2>&1", 10)
-        .await?;
-    let reload_combined = format!("{} {}", reload_stdout, reload_stderr);
-    let reload_ok = reload_code == 0
-        || reload_combined.contains("test is successful")
-        || reload_combined.contains("syntax is ok");
-    if !reload_ok {
-        return Err(format!("Nginx reload failed after site deletion: {}", reload_combined.trim()));
+    let (removed, remove_error, remove_code) = crate::ssh::session_exec_with_output(
+        session,
+        &format!("rm -- {quoted} && if [ ! -e {quoted} ]; then echo SITE_CONFIG_REMOVED; fi"),
+        10,
+    ).await?;
+    if remove_code != 0 || !removed.lines().any(|line| line.trim() == "SITE_CONFIG_REMOVED") {
+        return Err(format!("Site configuration was not deleted: {}", remove_error.trim()));
     }
+
+    let (reload_stdout, reload_stderr, reload_code) = crate::ssh::session_exec_with_output(
+        session, "nginx -t 2>&1 && systemctl reload nginx 2>&1", 10,
+    ).await?;
+    let reload_combined = format!("{} {}", reload_stdout, reload_stderr);
+    let reload_ok = reload_code == 0;
+    if !reload_ok {
+        return Err(format!("Configuration deleted, but Nginx reload failed: {}", reload_combined.trim()));
+    }
+    // This operation only changes Nginx configuration. Web content can be
+    // shared by other sites, so never remove it as a side effect.
+    let _ = remove_files;
 
     Ok(format!("Site {} deleted successfully", domain))
 }
@@ -9625,5 +9804,72 @@ mod keygen_tests {
         let normalized: Option<&str> = Some("").filter(|p| !p.is_empty());
         let res = try_load(&kp.private_key_pem, normalized);
         assert!(res.is_ok(), "normalized empty passphrase should load an unencrypted key: {:?}", res.err());
+    }
+}
+
+#[cfg(test)]
+mod ssl_expiry_tests {
+    use super::{parse_nginx_cert_path, parse_site_config};
+
+    #[test]
+    fn multiple_sites_in_one_conf_keep_their_own_ssl_and_root() {
+        let config = r#"server {
+            server_name nt.kkds.top;
+            root "/www/wwwroot/hongsha/web";
+            ssl_certificate /etc/letsencrypt/live/nt.kkds.top/fullchain.pem; # managed by Certbot
+            location ~ "^/([0-9A-Za-z]{6,})$" { return 302 /#/c; }
+        }
+        server {
+            server_name pdat.kkds.top;
+            root "/www/wwwroot/hongsha/pda";
+        }
+        #server { server_name ignored.example; }
+        server {
+            server_name apit.kkds.top;
+            root "/www/wwwroot/hongsha/backend/public";
+            ssl_certificate /etc/letsencrypt/live/apit.kkds.top/fullchain.pem; # managed by Certbot
+        }
+        server {
+            server_name apit.kkds.top;
+            return 301 https://apit.kkds.top;
+        }
+        "#;
+        let parsed = super::parse_sites_config("/etc/nginx/conf.d/hongsha.conf", config);
+        let mut sites = parsed;
+        sites.sort_by(|a, b| a.domain.cmp(&b.domain));
+        assert_eq!(sites.iter().map(|s| s.domain.as_str()).collect::<Vec<_>>(),
+                   vec!["apit.kkds.top", "nt.kkds.top", "pdat.kkds.top"]);
+        assert!(sites.iter().all(|s| s.shared_config));
+        assert!(sites[0].ssl);
+        assert_eq!(sites[0].ssl_cert_path.as_deref(), Some("/etc/letsencrypt/live/apit.kkds.top/fullchain.pem"));
+        assert!(sites[1].ssl);
+        assert!(!sites[2].ssl);
+        assert_eq!(sites[2].root, "/www/wwwroot/hongsha/pda");
+    }
+
+    #[test]
+    fn internal_stub_status_is_not_a_site() {
+        let config = "# managed-by: gmssh-nginx-manager\n# purpose: internal-stub-status\nserver { server_name _; location /nginx_status { stub_status; } }";
+        assert!(super::parse_sites_config("/etc/nginx/conf.d/stub_status.conf.gmssh-disabled", config).is_empty());
+        assert!(super::parse_sites_config("/etc/nginx/conf.d/stub_status.conf", config).is_empty());
+    }
+
+    #[test]
+    fn single_site_remains_deletable_but_shared_config_does_not() {
+        let single = super::parse_sites_config("/etc/nginx/conf.d/example.conf", "server {\n server_name example.org;\n root /var/www/example;\n}");
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].domain, "example.org");
+        assert!(!single[0].shared_config);
+        let shared = super::parse_sites_config("/etc/nginx/conf.d/shared.conf", "server {\n server_name a.example;\n}\nserver {\n server_name b.example;\n}");
+        assert_eq!(shared.len(), 2);
+        assert!(shared.iter().all(|site| site.shared_config));
+    }
+
+    #[test]
+    fn certbot_comment_does_not_become_part_of_cert_path() {
+        let config = "server_name birthday.biteme.site;\nlisten 443 ssl;\nssl_certificate /etc/letsencrypt/live/birthday.biteme.site/fullchain.pem; # managed by Certbot\n";
+        let site = parse_site_config("/etc/nginx/conf.d/birthday.conf", config).unwrap();
+        assert_eq!(site.ssl_cert_path.as_deref(), Some("/etc/letsencrypt/live/birthday.biteme.site/fullchain.pem"));
+        assert_eq!(parse_nginx_cert_path("/etc/a.pem; # managed by Certbot"), Some("/etc/a.pem".into()));
     }
 }

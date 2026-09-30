@@ -10,6 +10,7 @@ interface SiteInfo {
   root: string
   config_path: string
   ssl: boolean
+  ssl_expires_at: number | null
   php_version: string
   enabled: boolean
   created_at: number
@@ -26,7 +27,7 @@ interface SslLog {
 }
 
 export default function SslPanel({ sessionId }: SslPanelProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [sites, setSites] = useState<SiteInfo[]>([])
   const [loading, setLoading] = useState(false)
   const [logs, setLogs] = useState<Record<string, SslLog>>({})
@@ -150,6 +151,16 @@ export default function SslPanel({ sessionId }: SslPanelProps) {
               </div>
             </div>
             <div className="site-card-body">
+              {site.ssl && (
+                <div className="site-info-row">
+                  <span className="site-info-label">{t('ssl.expiresAt')}</span>
+                  <span className="site-info-value">
+                    {site.ssl_expires_at != null && Number.isFinite(site.ssl_expires_at)
+                      ? new Intl.DateTimeFormat(i18n.language, { dateStyle: 'medium', timeZone: 'UTC' }).format(new Date(site.ssl_expires_at * 1000))
+                      : t('ssl.expiryUnknown')}
+                  </span>
+                </div>
+              )}
               <div className="site-info-row">
                 <span className="site-info-value mono site-root-link">{site.root}</span>
               </div>

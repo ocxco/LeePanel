@@ -689,6 +689,7 @@
     "zset": "Sorted Set"
   },
   "sites": {
+    "sharedConfigWarning": "Shared Nginx file: edit the complete configuration below; individual site start, stop and delete are unavailable.",
     "title": "Sites",
     "searchDomain": "Search domain...",
     "searchResultsHint": "Current search results:",
@@ -970,6 +971,8 @@
     "title": "SSL Certificates",
     "noSites": "No sites found",
     "noSsl": "No SSL",
+    "expiresAt": "Expires",
+    "expiryUnknown": "Unknown",
     "installing": "Installing...",
     "freeInstall": "FREE Install SSL",
     "connectToManage": "Connect to a server to manage SSL certificates",

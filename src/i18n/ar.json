@@ -689,6 +689,7 @@
     "zset": "مجموعة مرتبة"
   },
   "sites": {
+    "sharedConfigWarning": "ملف Nginx مشترك: عدّل الإعدادات كاملة أدناه. لا تتوفر إجراءات التشغيل أو الإيقاف أو الحذف لكل موقع على حدة.",
     "title": "المواقع",
     "searchDomain": "بحث عن نطاق...",
     "searchResultsHint": "نتائج البحث الحالية:",
@@ -970,6 +971,8 @@
     "title": "شهادات SSL",
     "noSites": "لم يتم العثور على مواقع",
     "noSsl": "بدون SSL",
+    "expiresAt": "تاريخ الانتهاء",
+    "expiryUnknown": "غير معروف",
     "installing": "جارٍ التثبيت...",
     "freeInstall": "تثبيت SSL مجاناً",
     "connectToManage": "اتصل بخادم لإدارة شهادات SSL",

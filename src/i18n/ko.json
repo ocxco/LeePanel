@@ -689,6 +689,7 @@
     "zset": "정렬된 집합"
   },
   "sites": {
+    "sharedConfigWarning": "여러 사이트가 같은 Nginx 설정 파일을 사용합니다. 아래에서 전체 설정을 편집하세요. 개별 시작, 중지 및 삭제는 지원되지 않습니다.",
     "title": "사이트",
     "searchDomain": "도메인 검색...",
     "searchResultsHint": "현재 검색 결과:",
@@ -970,6 +971,8 @@
     "title": "SSL 인증서",
     "noSites": "사이트를 찾을 수 없음",
     "noSsl": "SSL 없음",
+    "expiresAt": "만료일",
+    "expiryUnknown": "알 수 없음",
     "installing": "설치 중...",
     "freeInstall": "무료 SSL 설치",
     "connectToManage": "SSL 인증서를 관리하려면 서버에 연결하세요",

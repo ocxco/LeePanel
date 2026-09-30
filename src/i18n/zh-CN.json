@@ -689,6 +689,7 @@
     "zset": "有序集合"
   },
   "sites": {
+    "sharedConfigWarning": "多个站点共用此 Nginx 配置文件；请在下方编辑完整配置，暂不支持单独启停或删除。",
     "title": "站点",
     "searchDomain": "搜索域名...",
     "searchResultsHint": "当前的搜索结果是：",
@@ -970,6 +971,8 @@
     "title": "SSL 证书",
     "noSites": "未找到站点",
     "noSsl": "无 SSL",
+    "expiresAt": "到期时间",
+    "expiryUnknown": "未知",
     "installing": "安装中...",
     "freeInstall": "免费安装 SSL",
     "connectToManage": "连接服务器以管理 SSL 证书",
